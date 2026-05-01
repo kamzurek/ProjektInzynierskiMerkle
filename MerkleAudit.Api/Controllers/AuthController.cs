@@ -41,7 +41,7 @@ namespace MerkleAudit.Api.Controllers
             {
                 Username = request.Username,
                 PasswordHash = passwordHash,
-                Role = "Admin" // Domyślnie nadajemy rolę Admina
+                Role = request.Role == "Admin" ? "Admin" : "User"
             };
 
             _context.Users.Add(user);
