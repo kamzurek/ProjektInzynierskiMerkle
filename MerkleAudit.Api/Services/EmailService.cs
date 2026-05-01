@@ -17,7 +17,7 @@ namespace MerkleAudit.Api.Services
             // Do kogo (tu wpisz swój prawdziwy adres e-mail, żeby odebrać powiadomienie!)
             email.To.Add(MailboxAddress.Parse("twoj.prawdziwy.mail@gmail.com"));
 
-            email.Subject = "🚨 KRYTYCZNY ALARM: Naruszenie integralności bazy danych!";
+            email.Subject = "KRYTYCZNY ALARM: Naruszenie integralności bazy danych!";
 
             // Budujemy ładną treść w HTML
             email.Body = new TextPart(MimeKit.Text.TextFormat.Html)

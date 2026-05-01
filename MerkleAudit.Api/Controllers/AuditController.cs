@@ -1,14 +1,16 @@
-﻿using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using MerkleAudit.Api.Data;
+﻿using MerkleAudit.Api.Data;
 using MerkleAudit.Api.Models;
 using MerkleAudit.Api.Services;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace MerkleAudit.Api.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Authorize]
     public class AuditController : ControllerBase
     {
         private readonly AppDbContext _context;
