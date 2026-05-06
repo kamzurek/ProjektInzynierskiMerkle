@@ -2,14 +2,14 @@
 {
     public class AuditLog
     {
-        // To będą kolumny w naszej bazie danych
         public int Id { get; set; }
-        public string Sender { get; set; }       // Nadawca przelewu
-        public string Receiver { get; set; }     // Odbiorca przelewu
-        public decimal Amount { get; set; }      // Kwota
-        public DateTime Timestamp { get; set; }  // Kiedy wykonano operację
-
-        // Nasze zabezpieczenie kryptograficzne
-        public string? Hash { get; set; }        // Hash z danych
+        public string Sender { get; set; } = string.Empty;
+        public string Receiver { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        public string IpAddress { get; set; } = string.Empty;
+        public string UserAgent { get; set; } = string.Empty;
+        public string PreviousHash { get; set; } = string.Empty;
+        public string Hash { get; set; } = string.Empty;
     }
 }

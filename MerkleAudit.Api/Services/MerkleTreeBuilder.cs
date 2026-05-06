@@ -3,6 +3,14 @@ using MerkleAudit.Api.Models;
 
 namespace MerkleAudit.Api.Services
 {
+    // Mała klasa pomocnicza, którą wyślemy do Reacta. 
+    // Mówi ona: "Weź ten Hash i doklej go z Lewej (lub z Prawej) strony swojego Hasha".
+    public class MerkleProofNode
+    {
+        public string Hash { get; set; } = string.Empty;
+        public string Direction { get; set; } = string.Empty; // "Left" lub "Right"
+    }
+
     public class MerkleTreeBuilder
     {
         private readonly CryptoService _cryptoService;
@@ -13,47 +21,97 @@ namespace MerkleAudit.Api.Services
             _cryptoService = cryptoService;
         }
 
-        // Główna metoda, która z listy przelewów wylicza jeden Główny Hash (Merkle Root)
+        // 1. GŁÓWNA METODA (Twoja dotychczasowa)
         public string BuildRoot(List<AuditLog> logs)
         {
-            // Jeśli baza jest pusta, zwracamy null
             if (logs == null || logs.Count == 0)
                 return null;
 
-            // Krok 1: Zbieramy hasze ze wszystkich logów. To są nasze "liście" na samym dole drzewa.
             List<string> currentLevel = new List<string>();
             foreach (var log in logs)
             {
-                // Jeśli log ma już swój hash, bierzemy go. Jeśli nie (bo np. to nowy przelew), wyliczamy na nowo.
                 string logHash = string.IsNullOrEmpty(log.Hash) ? _cryptoService.CalculateHashForLog(log) : log.Hash;
                 currentLevel.Add(logHash);
             }
 
-            // Krok 2: Budujemy drzewo w górę. Pętla działa tak długo, aż zostanie nam tylko 1 element.
+            while (currentLevel.Count > 1)
+            {
+                List<string> nextLevel = new List<string>();
+                for (int i = 0; i < currentLevel.Count; i += 2)
+                {
+                    string leftHash = currentLevel[i];
+                    string rightHash = (i + 1 < currentLevel.Count) ? currentLevel[i + 1] : leftHash;
+                    string combinedHash = _cryptoService.CombineAndHash(leftHash, rightHash);
+                    nextLevel.Add(combinedHash);
+                }
+                currentLevel = nextLevel;
+            }
+
+            return currentLevel[0];
+        }
+
+        // 2. NOWA METODA INŻYNIERSKA: Generowanie Dowodu Inkluzji (Merkle Proof)
+        public List<MerkleProofNode> GetProof(List<AuditLog> logs, string targetHash)
+        {
+            if (logs == null || logs.Count == 0) return null;
+
+            List<string> currentLevel = new List<string>();
+            int targetIndex = -1;
+
+            // Najpierw ładujemy najniższy poziom (wszystkie hasze) i szukamy, gdzie jest nasz przelew
+            for (int i = 0; i < logs.Count; i++)
+            {
+                string logHash = string.IsNullOrEmpty(logs[i].Hash) ? _cryptoService.CalculateHashForLog(logs[i]) : logs[i].Hash;
+                currentLevel.Add(logHash);
+
+                if (logHash == targetHash)
+                {
+                    targetIndex = i; // Znaleźliśmy nasz przelew, zapisujemy jego pozycję!
+                }
+            }
+
+            if (targetIndex == -1) return null; // Błąd: Przelew nie istnieje w bazie
+
+            List<MerkleProofNode> proof = new List<MerkleProofNode>();
+
+            // Wspinamy się po drzewie w górę (identycznie jak przy budowaniu Roota)
             while (currentLevel.Count > 1)
             {
                 List<string> nextLevel = new List<string>();
 
-                // Skaczemy co 2 (bierzemy lewy i prawy element)
+                // Sprawdzamy czy nasz target na tym poziomie jest po parzystej (Lewa) czy nieparzystej (Prawa) stronie
+                bool isRightNode = targetIndex % 2 != 0;
+
+                // Jeśli jesteśmy z prawej, nasz "brat" do pary jest z lewej (targetIndex - 1) i na odwrót
+                int siblingIndex = isRightNode ? targetIndex - 1 : targetIndex + 1;
+
+                // Uwzględniamy logikę nieparzystej liczby elementów z Twojego BuildRoot (duplikacja)
+                if (siblingIndex >= currentLevel.Count)
+                {
+                    siblingIndex = targetIndex;
+                }
+
+                // Dodajemy brata do dowodu!
+                proof.Add(new MerkleProofNode
+                {
+                    Hash = currentLevel[siblingIndex],
+                    Direction = isRightNode ? "Left" : "Right" // Mówimy klientowi, z której strony ma go dokleić
+                });
+
+                // Budujemy wyższy poziom drzewa dla kolejnej iteracji pętli
                 for (int i = 0; i < currentLevel.Count; i += 2)
                 {
                     string leftHash = currentLevel[i];
-
-                    // Magia Drzewa Merkle: co jeśli mamy nieparzystą liczbę logów? 
-                    // Algorytm mówi: "Zduplikuj ostatni hash i połącz go z samym sobą".
                     string rightHash = (i + 1 < currentLevel.Count) ? currentLevel[i + 1] : leftHash;
-
-                    // Łączymy dwa hasze z niższego poziomu w jeden nowy na wyższym poziomie
-                    string combinedHash = _cryptoService.CombineAndHash(leftHash, rightHash);
-                    nextLevel.Add(combinedHash);
+                    nextLevel.Add(_cryptoService.CombineAndHash(leftHash, rightHash));
                 }
 
-                // Przechodzimy poziom wyżej i powtarzamy proces
                 currentLevel = nextLevel;
+                // Na wyższym poziomie nasz target ma już o połowę mniejszy indeks
+                targetIndex /= 2;
             }
 
-            // Krok 3: Zwracamy ten jeden, ostatni hash, który został na samej górze piramidy
-            return currentLevel[0];
+            return proof;
         }
     }
 }

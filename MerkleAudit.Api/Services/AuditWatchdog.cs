@@ -37,32 +37,35 @@ namespace MerkleAudit.Api.Services
                     {
                         var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                         var cryptoService = scope.ServiceProvider.GetRequiredService<CryptoService>();
+                        var emailService = scope.ServiceProvider.GetRequiredService<EmailService>();
 
-                        var logs = await dbContext.AuditLogs.ToListAsync(stoppingToken);
+                        // UWAGA: Upewniamy się, że pobieramy wpisy posortowane po ID, żeby łańcuch miał sens!
+                        var logs = await dbContext.AuditLogs.OrderBy(l => l.Id).ToListAsync(stoppingToken);
                         bool isCorrupted = false;
 
-                        // Skanujemy każdy wpis w bazie linijka po linijce
-                        foreach (var log in logs)
+                        // Używamy pętli FOR, żeby mieć dostęp do indeksu [i] oraz wpisu poprzedniego [i-1]
+                        for (int i = 0; i < logs.Count; i++)
                         {
-                            // Wyliczamy hash na nowo na podstawie tego, co JEST w bazie
+                            var log = logs[i];
                             string expectedHash = cryptoService.CalculateHashForLog(log);
 
-                            // Porównujemy go z "plombą" zapisaną w bazie
+                            // --- 1. SPRAWDZANIE PLOMBY (Twoja dotychczasowa logika) ---
                             if (log.Hash != expectedHash)
                             {
-                                // ALARM W KONSOLI!
-                                _logger.LogCritical($">>> [ALARM WŁAMANIA!] Zmodyfikowano wpis ID: {log.Id} z pominięciem serwera!");
-                                _logger.LogCritical($"    Oczekiwano: {expectedHash}");
-                                _logger.LogCritical($"    W bazie:    {log.Hash}");
+                                _logger.LogCritical($">>> [ALARM WŁAMANIA!] Zmodyfikowano zawartość wpisu ID: {log.Id}!");
                                 isCorrupted = true;
 
-                                // WYSYŁAMY MAILA!
-                                // Ponieważ jesteśmy w pętli działającej w tle, "wyciągamy" serwis pocztowy z naszego Scope'a
-                                var emailService = scope.ServiceProvider.GetRequiredService<EmailService>();
+                                string emailMessage = $"<strong>Naruszenie danych!</strong><br/>Zmodyfikowano wpis ID: {log.Id}.<br/>Oczekiwany Hash: {expectedHash}<br/>Hash w bazie: {log.Hash}";
+                                await emailService.SendAlertEmailAsync(emailMessage);
+                            }
 
-                                string emailMessage = $"Zmodyfikowano wpis ID: {log.Id}.<br/>Oczekiwany Hash: {expectedHash}<br/>Hash w bazie: {log.Hash}";
+                            // --- 2. SPRAWDZANIE ŁAŃCUCHA (Nasza nowa ochrona przed inteligentnym atakiem) ---
+                            if (i > 0 && log.PreviousHash != logs[i - 1].Hash)
+                            {
+                                _logger.LogCritical($">>> [ZERWANY ŁAŃCUCH!] Wpis ID: {log.Id} stracił kryptograficzne powiązanie z wpisem ID: {logs[i - 1].Id}!");
+                                isCorrupted = true;
 
-                                // Dodajemy await, żeby poczekać na wysłanie maila
+                                string emailMessage = $"<strong>Zerwanie łańcucha bloków!</strong><br/>Wpis ID: {log.Id} ma błędny PreviousHash. Ktoś podmienił historyczną transakcję ID: {logs[i - 1].Id} i wyliczył nowy hash!";
                                 await emailService.SendAlertEmailAsync(emailMessage);
                             }
                         }

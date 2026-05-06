@@ -26,11 +26,25 @@ namespace MerkleAudit.Api.Controllers
             _cryptoService = cryptoService;
         }
 
+        // --- FUNKCJA POMOCNICZA: Weryfikacja Stateful (czy User z tokenu nadal istnieje w bazie) ---
+        private async Task<bool> IsSessionValid()
+        {
+            var loggedInUser = User.Identity?.Name;
+            if (string.IsNullOrEmpty(loggedInUser)) return false;
+
+            // Fizycznie sprawdzamy, czy w wyczyszczonej bazie nadal istnieje ten login
+            return await _context.Users.AnyAsync(u => u.Username == loggedInUser);
+        }
+        // -----------------------------------------------------------------------------------------
+
         // 1. Wgląd do historii przelewów - TYLKO DLA ADMINA
         [HttpGet]
         [Authorize(Roles = "Admin")]
         public async Task<IActionResult> GetAllLogs()
         {
+            // BLOKADA SESJI
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła lub baza została zresetowana.");
+
             var logs = await _context.AuditLogs.ToListAsync();
             return Ok(logs);
         }
@@ -40,14 +54,12 @@ namespace MerkleAudit.Api.Controllers
         [Authorize(Roles = "Admin")]
         public async Task<IActionResult> AddLog([FromBody] AuditLog newLog)
         {
-            // 1. Zapisujemy goły wpis do bazy, żeby SQLite nadał mu prawdziwe ID (np. 1, 2, 3)
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
             _context.AuditLogs.Add(newLog);
             await _context.SaveChangesAsync();
 
-            // 2. Teraz nasz newLog ma już poprawne ID. Liczymy z niego Hash!
             newLog.Hash = _cryptoService.CalculateHashForLog(newLog);
-
-            // 3. Aktualizujemy wpis w bazie o nowo wyliczoną "plombę"
             await _context.SaveChangesAsync();
 
             return Ok(newLog);
@@ -58,6 +70,8 @@ namespace MerkleAudit.Api.Controllers
         [Authorize(Roles = "Admin")]
         public async Task<IActionResult> GetMerkleRoot()
         {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
             var logs = await _context.AuditLogs.ToListAsync();
             var root = _treeBuilder.BuildRoot(logs);
 
@@ -66,17 +80,14 @@ namespace MerkleAudit.Api.Controllers
                 return Ok(new { message = "Drzewo jest puste - brak logów" });
             }
 
-            // Serwer bierze swój tajny klucz i składa cyfrowy podpis pod Rootem
             var digitalSignature = _cryptoService.SignData(root);
-
-            // Pobieramy klucz publiczny, żeby udostępnić go światu do weryfikacji podpisu
             var publicKey = _cryptoService.GetPublicKey();
 
             return Ok(new
             {
                 currentRoot = root,
-                serverSignature = digitalSignature, // Kryptograficzny dowód autentyczności!
-                publicKey = publicKey               // Klucz do sprawdzenia dowodu
+                serverSignature = digitalSignature,
+                publicKey = publicKey
             });
         }
 
@@ -85,42 +96,87 @@ namespace MerkleAudit.Api.Controllers
         [Authorize]
         public async Task<IActionResult> MakeTransfer(TransferDto request)
         {
-            // 1. Wyciągamy tożsamość prosto z tokenu JWT!
+            // BLOKADA SESJI
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła lub baza została zresetowana.");
+
             var loggedInUser = User.Identity?.Name;
 
-            if (string.IsNullOrEmpty(loggedInUser))
-            {
-                return Unauthorized("Brak informacji o tożsamości w tokenie.");
-            }
+            // Pobieramy IP i UserAgent
+            var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown IP";
+            var userAgent = Request.Headers["User-Agent"].ToString();
+            if (string.IsNullOrEmpty(userAgent)) userAgent = "Unknown Device";
 
-            // 2. Tworzymy nowy log, ignorując pole Sender wysłane w JSON
+            var lastLog = await _context.AuditLogs.OrderByDescending(l => l.Id).FirstOrDefaultAsync();
+            string previousHash = lastLog?.Hash ?? new string('0', 64);
+
             var newLog = new AuditLog
             {
-                Sender = loggedInUser, // <--- Wpisujemy nazwę zalogowanego użytkownika!
+                Sender = loggedInUser,
                 Receiver = request.Receiver,
                 Amount = request.Amount,
+                PreviousHash = previousHash,
+                IpAddress = ipAddress,
+                UserAgent = userAgent,
                 Hash = "pending..."
             };
 
-            // 3. Zapisujemy goły wpis do bazy (nadanie ID)
             _context.AuditLogs.Add(newLog);
             await _context.SaveChangesAsync();
 
-            // 4. Obliczamy prawidłowy hash naszym autorskim serwisem
             newLog.Hash = _cryptoService.CalculateHashForLog(newLog);
 
-            // 5. Aktualizujemy w bazie z prawidłową plombą
             await _context.SaveChangesAsync();
 
             return Ok(newLog);
         }
 
-        // 5. SYMULACJA ATAKU (Backdoor z poprzedniego etapu) - TYLKO DLA ADMINA
+        // NOWOŚĆ: Pobieranie Dowodu Merkle
+        [HttpGet("proof/{id}")]
+        [Authorize]
+        public async Task<IActionResult> GetMerkleProof(int id)
+        {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
+            var logTarget = await _context.AuditLogs.FindAsync(id);
+            if (logTarget == null) return NotFound("Brak transakcji o takim ID.");
+
+            // --- 🚨 ZABEZPIECZENIE 1: Weryfikacja Zawartości (Pudełko vs Plomba) ---
+            var actualCalculatedHash = _cryptoService.CalculateHashForLog(logTarget);
+            if (actualCalculatedHash != logTarget.Hash)
+            {
+                return BadRequest($"🚨 KRYTYCZNY BŁĄD INTEGRALNOŚCI!\nDane przelewu ID {id} zostały zmanipulowane w bazie.\nZapisana plomba nie zgadza się z aktualną kwotą/odbiorcą!");
+            }
+
+            var allLogs = await _context.AuditLogs.OrderBy(l => l.Id).ToListAsync();
+
+            // --- 🚨 ZABEZPIECZENIE 2: Weryfikacja Łańcucha (Chronologia) ---
+            for (int i = 1; i < allLogs.Count; i++)
+            {
+                if (allLogs[i].PreviousHash != allLogs[i - 1].Hash)
+                {
+                    return BadRequest($"🚨 ZERWANY ŁAŃCUCH BLOKÓW!\nWpis ID {allLogs[i].Id} posiada błędny PreviousHash. Ktoś podmienił historyczną transakcję ID {allLogs[i - 1].Id}!");
+                }
+            }
+
+            var proof = _treeBuilder.GetProof(allLogs, logTarget.Hash);
+            if (proof == null) return BadRequest("Nie udało się wygenerować dowodu kryptograficznego.");
+
+            return Ok(new
+            {
+                LogId = id,
+                TargetHash = logTarget.Hash,
+                Proof = proof
+            });
+        }
+
+        // 5. SYMULACJA ATAKU
         [HttpPost("simulate-attack")]
         [Authorize(Roles = "Admin")]
         public async Task<IActionResult> SimulateAttack()
         {
-            // 1. Pobieramy najstarszy log z bazy
+            // BLOKADA SESJI
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
             var logToHack = await _context.AuditLogs.FirstOrDefaultAsync();
 
             if (logToHack == null)
@@ -128,11 +184,7 @@ namespace MerkleAudit.Api.Controllers
                 return NotFound("Brak transakcji w bazie do zhakowania!");
             }
 
-            // 2. SYMULACJA ATAKU: Zmieniamy kwotę na absurdalnie wielką.
-            // Zauważ, że celowo NIE przeliczamy na nowo hasza!
             logToHack.Amount += 999999;
-
-            // 3. Zapisujemy zepsuty rekord do bazy
             await _context.SaveChangesAsync();
 
             return Ok(new { message = $"Włamanie udane! Kwota przelewu ID {logToHack.Id} została zmanipulowana. Watchdog powinien wkrótce zareagować." });

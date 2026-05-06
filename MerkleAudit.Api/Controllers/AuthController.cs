@@ -27,21 +27,21 @@ namespace MerkleAudit.Api.Controllers
         [HttpPost("register")]
         public async Task<ActionResult<User>> Register(UserRegisterDto request)
         {
-            // 1. Sprawdzamy czy użytkownik już istnieje
             if (await _context.Users.AnyAsync(u => u.Username == request.Username))
             {
                 return BadRequest("Użytkownik o takiej nazwie już istnieje.");
             }
 
-            // 2. Hashujemy hasło algorytmem BCrypt
             string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
-            // 3. Tworzymy użytkownika
             var user = new User
             {
                 Username = request.Username,
                 PasswordHash = passwordHash,
-                Role = request.Role == "Admin" ? "Admin" : "User"
+                Role = request.Role == "Admin" ? "Admin" : "User",
+                FirstName = request.FirstName,
+                LastName = request.LastName,
+                Email = request.Email
             };
 
             _context.Users.Add(user);

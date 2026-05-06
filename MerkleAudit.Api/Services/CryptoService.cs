@@ -48,23 +48,28 @@ namespace MerkleAudit.Api.Services
 
         public string CalculateHashForLog(AuditLog log)
         {
-            // Standaryzacja danych!
+            // 1. Standaryzacja danych!
             // Zmuszamy kwotę, by ZAWSZE miała 2 miejsca po przecinku (np. 1500.00) bez względu na to, jak odda ją baza.
-            // Używamy InvariantCulture, żeby zapobiec zamianie kropki na przecinek na polskich Windowsach!
+            // Używamy InvariantCulture, żeby zapobiec zamianie kropki na przecinek na polskich Windowsach.
             string amountFormatted = log.Amount.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
 
-            // Formatujemy datę ucinając z niej milisekundy i strefy czasowe (znika problem z literką Z)
+            // 2. Formatujemy datę ucinając z niej milisekundy i strefy czasowe
             string dateFormatted = log.Timestamp.ToString("yyyy-MM-ddTHH:mm:ss");
 
-            // Teraz nasz tekst do hashowania jest pancerny i niezmienny
-            string rawData = $"{log.Id}-{log.Sender}-{log.Receiver}-{amountFormatted}-{dateFormatted}";
+            // 3. Budujemy surowy tekst do hashowania
+            // DODANO: Wplatamy Cyfrowe Ślady (IP oraz UserAgent) tuż przed PreviousHash!
+            string rawData = $"{log.Id}{log.Sender}{log.Receiver}{amountFormatted}{dateFormatted}{log.IpAddress}{log.UserAgent}{log.PreviousHash}";
 
-            byte[] bytes = Encoding.UTF8.GetBytes(rawData);
-
-            using (SHA256 sha256 = SHA256.Create())
+            using (var sha256 = System.Security.Cryptography.SHA256.Create())
             {
-                byte[] hashBytes = sha256.ComputeHash(bytes);
-                return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                // 4. Liczymy hash 
+                byte[] hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(rawData));
+                System.Text.StringBuilder builder = new System.Text.StringBuilder();
+                foreach (var b in hashBytes)
+                {
+                    builder.Append(b.ToString("x2"));
+                }
+                return builder.ToString();
             }
         }
 
