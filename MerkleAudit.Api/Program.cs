@@ -17,6 +17,7 @@ builder.Services.AddScoped<MerkleTreeBuilder>();
 
 builder.Services.AddHostedService<AuditWatchdog>();
 builder.Services.AddScoped<EmailService>();
+builder.Services.AddSingleton<GlobalAppState>();
 
 // Add services to the container.
 
@@ -27,7 +28,7 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
     {
-        policy.WithOrigins("http://localhost:5173") // Dok³adny adres z Twojego b³êdu!
+        policy.WithOrigins("http://localhost:5173")
               .AllowAnyHeader()
               .AllowAnyMethod();
     });

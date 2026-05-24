@@ -39,7 +39,16 @@ namespace MerkleAudit.Api.Services
                         var cryptoService = scope.ServiceProvider.GetRequiredService<CryptoService>();
                         var emailService = scope.ServiceProvider.GetRequiredService<EmailService>();
 
-                        // UWAGA: Upewniamy się, że pobieramy wpisy posortowane po ID, żeby łańcuch miał sens!
+                        // DODANO: Pobieramy globalny stan
+                        var appState = scope.ServiceProvider.GetRequiredService<GlobalAppState>();
+
+                        // Jeśli system już jest w kwarantannie, Watchdog nie musi ciągle wysyłać maili
+                        if (appState.IsQuarantineActive)
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
+                            continue;
+                        }
+
                         var logs = await dbContext.AuditLogs.OrderBy(l => l.Id).ToListAsync(stoppingToken);
                         bool isCorrupted = false;
 
@@ -57,6 +66,9 @@ namespace MerkleAudit.Api.Services
 
                                 string emailMessage = $"<strong>Naruszenie danych!</strong><br/>Zmodyfikowano wpis ID: {log.Id}.<br/>Oczekiwany Hash: {expectedHash}<br/>Hash w bazie: {log.Hash}";
                                 await emailService.SendAlertEmailAsync(emailMessage);
+
+                                appState.IsQuarantineActive = true;
+                                appState.QuarantineReason = $"Zablokowano z powodu wpisu ID: {log.Id}";
                             }
 
                             // --- 2. SPRAWDZANIE ŁAŃCUCHA (Nasza nowa ochrona przed inteligentnym atakiem) ---
@@ -67,12 +79,17 @@ namespace MerkleAudit.Api.Services
 
                                 string emailMessage = $"<strong>Zerwanie łańcucha bloków!</strong><br/>Wpis ID: {log.Id} ma błędny PreviousHash. Ktoś podmienił historyczną transakcję ID: {logs[i - 1].Id} i wyliczył nowy hash!";
                                 await emailService.SendAlertEmailAsync(emailMessage);
+
+                                appState.IsQuarantineActive = true;
+                                appState.QuarantineReason = $"Zablokowano z powodu wpisu ID: {log.Id}";
                             }
                         }
+
 
                         if (!isCorrupted && logs.Count > 0)
                         {
                             _logger.LogInformation($">>> [Strażnik] Baza bezpieczna. Przeskanowano wpisów: {logs.Count}.");
+
                         }
                     }
                 }

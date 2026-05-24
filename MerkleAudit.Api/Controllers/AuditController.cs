@@ -5,8 +5,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Text;
+using System.Net.NetworkInformation;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace MerkleAudit.Api.Controllers
 {
@@ -18,12 +19,14 @@ namespace MerkleAudit.Api.Controllers
         private readonly AppDbContext _context;
         private readonly MerkleTreeBuilder _treeBuilder;
         private readonly CryptoService _cryptoService;
+        private readonly GlobalAppState _appState;
 
-        public AuditController(AppDbContext context, MerkleTreeBuilder treeBuilder, CryptoService cryptoService)
+        public AuditController(AppDbContext context, MerkleTreeBuilder treeBuilder, CryptoService cryptoService, GlobalAppState appState)
         {
             _context = context;
             _treeBuilder = treeBuilder;
             _cryptoService = cryptoService;
+            _appState = appState;
         }
 
         // --- FUNKCJA POMOCNICZA: Weryfikacja Stateful (czy User z tokenu nadal istnieje w bazie) ---
@@ -37,16 +40,29 @@ namespace MerkleAudit.Api.Controllers
         }
         // -----------------------------------------------------------------------------------------
 
-        // 1. Wgląd do historii przelewów - TYLKO DLA ADMINA
+        // 1. Wgląd do historii przelewów - DOPASOWANY DO ROLI
         [HttpGet]
-        [Authorize(Roles = "Admin")]
+        [Authorize] // Zmieniamy z [Authorize(Roles = "Admin")] na ogólne [Authorize]
         public async Task<IActionResult> GetAllLogs()
         {
             // BLOKADA SESJI
             if (!await IsSessionValid()) return Unauthorized("Sesja wygasła lub baza została zresetowana.");
 
-            var logs = await _context.AuditLogs.ToListAsync();
-            return Ok(logs);
+            var loggedInUser = User.Identity?.Name;
+
+            // Jeśli zalogowany to Administrator -> widzi pełny rejestr systemowy
+            if (User.IsInRole("Admin"))
+            {
+                var allLogs = await _context.AuditLogs.ToListAsync();
+                return Ok(allLogs);
+            }
+
+            // Jeśli to zwykły użytkownik -> filtrujemy bazę, zwracając wyłącznie jego przelewy
+            var userTransfers = await _context.AuditLogs
+                .Where(l => l.Sender == loggedInUser)
+                .ToListAsync();
+
+            return Ok(userTransfers);
         }
 
         // 2. Dodanie starego typu logu ręcznie - TYLKO DLA ADMINA
@@ -96,6 +112,12 @@ namespace MerkleAudit.Api.Controllers
         [Authorize]
         public async Task<IActionResult> MakeTransfer(TransferDto request)
         {
+
+            if (_appState.IsQuarantineActive)
+            {
+                return StatusCode(503, new { message = "SYSTEM ZABLOKOWANY (KWARANTANNA)", reason = _appState.QuarantineReason });
+            }
+
             // BLOKADA SESJI
             if (!await IsSessionValid()) return Unauthorized("Sesja wygasła lub baza została zresetowana.");
 
@@ -170,24 +192,82 @@ namespace MerkleAudit.Api.Controllers
         }
 
         // 5. SYMULACJA ATAKU
-        [HttpPost("simulate-attack")]
+        [HttpPost("simulate-attack/{id}")]
         [Authorize(Roles = "Admin")]
-        public async Task<IActionResult> SimulateAttack()
+        public async Task<IActionResult> SimulateAttack(int id, [FromQuery] bool recalculateHash = false)
         {
-            // BLOKADA SESJI
             if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
 
-            var logToHack = await _context.AuditLogs.FirstOrDefaultAsync();
+            var logToHack = await _context.AuditLogs.FindAsync(id);
+            if (logToHack == null) return NotFound($"Brak transakcji o ID {id} w bazie!");
 
-            if (logToHack == null)
-            {
-                return NotFound("Brak transakcji w bazie do zhakowania!");
-            }
-
+            // Zmieniamy kwotę (atak na dane)
             logToHack.Amount += 999999;
+
+            if (recalculateHash)
+            {
+                // ATAK INTELIGENTNY: Haker zmienia dane i sam przelicza nowy hash.
+                // Oszuka plombę, ale zerwie łańcuch (PreviousHash) dla kolejnego bloku!
+                logToHack.Hash = _cryptoService.CalculateHashForLog(logToHack);
+            }
+            // Jeśli recalculateHash == false, to jest to ZWYKŁY ATAK: hash w bazie zostaje stary, a dane są nowe (plomba pęka).
+
             await _context.SaveChangesAsync();
 
-            return Ok(new { message = $"Włamanie udane! Kwota przelewu ID {logToHack.Id} została zmanipulowana. Watchdog powinien wkrótce zareagować." });
+            string attackType = recalculateHash ? "Inteligentny (Zerwanie Łańcucha)" : "Zwykły (Złamanie Plomby)";
+            return Ok(new { message = $"Włamanie udane! Typ ataku: {attackType}. Kwota przelewu ID {logToHack.Id} została zmanipulowana. Watchdog powinien wkrótce zareagować." });
+        }
+
+        // 6. STATUS SERWERA I WATCHDOGA (Dla nowej zakładki w React)
+        [HttpGet("status")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> GetServerStatus()
+        {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
+            return Ok(new
+            {
+                isQuarantineActive = _appState.IsQuarantineActive,
+                quarantineReason = _appState.QuarantineReason,
+                serverTime = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                watchdogStatus = "Aktywny (Skanowanie w tle z częstotliwością 15s)"
+            });
+        }
+
+        [HttpPost("reset-quarantine")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> ResetQuarantine()
+        {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
+            _appState.IsQuarantineActive = false;
+            _appState.QuarantineReason = string.Empty;
+
+            return Ok(new { message = "Kwarantanna została pomyślnie zdjęta. System wznawia normalną pracę." });
+        }
+
+        // 8. COFNIĘCIE ATAKU I NAPRAWA BAZY (Tylko na potrzeby prezentacji!)
+        [HttpPost("revert-attack/{id}")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> RevertAttack(int id)
+        {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
+            var logToFix = await _context.AuditLogs.FindAsync(id);
+            if (logToFix == null) return NotFound($"Brak transakcji o ID {id} w bazie!");
+
+            // 1. Cofamy zmanipulowaną kwotę (odejmujemy to, co haker dodał)
+            logToFix.Amount -= 999999;
+
+            // 2. Przeliczamy ponownie prawidłowy hash (plomba wraca do normy)
+            logToFix.Hash = _cryptoService.CalculateHashForLog(logToFix);
+            await _context.SaveChangesAsync();
+
+            // 3. Automatycznie zdejmujemy kwarantannę, bo baza jest już czysta
+            _appState.IsQuarantineActive = false;
+            _appState.QuarantineReason = string.Empty;
+
+            return Ok(new { message = $"Baza danych naprawiona! Wpis ID {id} wrócił do oryginału, a kwarantanna została zdjęta." });
         }
     }
 }
