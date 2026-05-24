@@ -42,7 +42,7 @@ namespace MerkleAudit.Api.Controllers
 
         // 1. Wgląd do historii przelewów - DOPASOWANY DO ROLI
         [HttpGet]
-        [Authorize] // Zmieniamy z [Authorize(Roles = "Admin")] na ogólne [Authorize]
+        [Authorize]
         public async Task<IActionResult> GetAllLogs()
         {
             // BLOKADA SESJI
@@ -83,7 +83,7 @@ namespace MerkleAudit.Api.Controllers
 
         // 3. Pobieranie dowodów kryptograficznych - TYLKO DLA ADMINA
         [HttpGet("root")]
-        [Authorize(Roles = "Admin")]
+        [Authorize]
         public async Task<IActionResult> GetMerkleRoot()
         {
             if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
@@ -268,6 +268,79 @@ namespace MerkleAudit.Api.Controllers
             _appState.QuarantineReason = string.Empty;
 
             return Ok(new { message = $"Baza danych naprawiona! Wpis ID {id} wrócił do oryginału, a kwarantanna została zdjęta." });
+        }
+
+        // 9. HARD RESET BAZY DANYCH (Tylko na potrzeby prezentacji)
+        [HttpDelete("reset-database")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> ResetDatabase()
+        {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
+            // 1. Usuwamy wszystkie wpisy z tabeli logów
+            _context.AuditLogs.RemoveRange(_context.AuditLogs);
+            await _context.SaveChangesAsync();
+
+            // 2. Resetujemy licznik Auto-Increment dla SQLite, żeby nowe ID znowu startowało od 1
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM sqlite_sequence WHERE name='AuditLogs'");
+
+            // 3. Automatycznie zdejmujemy kwarantannę (jeśli była aktywna)
+            _appState.IsQuarantineActive = false;
+            _appState.QuarantineReason = string.Empty;
+
+            return Ok(new { message = "Baza danych wyczyszczona! Licznik ID zresetowany. Gotowe do nowej prezentacji." });
+        }
+
+        [HttpPost("simulate-chain-break/{id}")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> SimulateChainBreak(int id)
+        {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
+            var logToBreak = await _context.AuditLogs.FindAsync(id);
+            if (logToBreak == null) return NotFound($"Brak transakcji o ID {id}");
+
+            // Haker niszczy powiązanie z poprzednim blokiem
+            logToBreak.PreviousHash = "HACKED_CHAIN_0000000000000000000";
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = "Łańcuch chronologiczny został zerwany! Watchdog zaraz to wykryje." });
+        }
+
+        [HttpPost("seed")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> SeedDatabase()
+        {
+            if (!await IsSessionValid()) return Unauthorized("Sesja wygasła.");
+
+            var receivers = new[] { "Jan Kowalski", "Sklep Elektroniczny", "Anna Nowak", "Opłata za prąd", "Księgarnia Naukowa", "Politechnika Śląska", "Urząd Skarbowy", "Hurtownia IT" };
+            var random = new Random();
+
+            for (int i = 0; i < 10; i++)
+            {
+                var receiver = receivers[random.Next(receivers.Length)];
+                var amount = Math.Round((decimal)(random.NextDouble() * 2500 + 50), 2);
+
+                var lastLog = await _context.AuditLogs.OrderByDescending(l => l.Id).FirstOrDefaultAsync();
+                string previousHash = lastLog?.Hash ?? new string('0', 64);
+
+                var newLog = new AuditLog
+                {
+                    Sender = User.Identity?.Name ?? "Admin",
+                    Receiver = receiver,
+                    Amount = amount,
+                    Timestamp = DateTime.UtcNow,
+                    IpAddress = "127.0.0.1",
+                    UserAgent = "Auto-Seeder/1.0",
+                    PreviousHash = previousHash
+                };
+
+                newLog.Hash = _cryptoService.CalculateHashForLog(newLog);
+                _context.AuditLogs.Add(newLog);
+                await _context.SaveChangesAsync();
+            }
+
+            return Ok(new { message = "Wygenerowano 10 losowych przelewów testowych." });
         }
     }
 }
