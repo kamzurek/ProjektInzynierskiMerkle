@@ -1,3 +1,18 @@
+/**
+ * ============================================================================
+ * Politechnika Œl¹ska
+ * Wydzia³ In¿ynierii Materia³owej i Cyfryzacji Przemys³u
+ * Kierunek: Informatyka Przemys³owa
+ * * PROJEKT IN¯YNIERSKI
+ * Tytu³: "Kryptograficznie weryfikowalny dziennik audytu operacji w systemach webowych"
+ * * Autor: Kamil ¯urek
+ * Nr albumu: 305428
+ * Prowadz¹cy pracê: dr in¿. £ukasz Maliñski
+ * Rok akademicki: 2025/2026
+ * ============================================================================
+ */
+
+
 using MerkleAudit.Api.Data;
 using MerkleAudit.Api.Services;
 using Microsoft.EntityFrameworkCore;
