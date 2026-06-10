@@ -40,7 +40,9 @@ namespace MerkleAudit.Api.Services
                 for (int i = 0; i < currentLevel.Count; i += 2)
                 {
                     string leftHash = currentLevel[i];
-                    string rightHash = (i + 1 < currentLevel.Count) ? currentLevel[i + 1] : leftHash;
+                    string rightHash = (i + 1 < currentLevel.Count) 
+                                       ? currentLevel[i + 1] 
+                                       : leftHash;
                     string combinedHash = _cryptoService.CombineAndHash(leftHash, rightHash);
                     nextLevel.Add(combinedHash);
                 }
